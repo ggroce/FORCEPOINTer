@@ -1,8 +1,8 @@
 # Forcepoint Case Export → Report & Email Folders
 
-Two small Python tools for working with a **Forcepoint Investigations Workbench**
+Two small tools for working with a **Forcepoint Investigations Workbench**
 case export (the JSON + binary tree produced when a case is exported from the
-workbench):
+workbench) — implemented in **Python** (reference), **PowerShell**, and **C#**:
 
 | Tool | What it does |
 |---|---|
@@ -70,10 +70,24 @@ inline.
 ## extract_email_folders.py — per-email folders
 
 ```
-python3 extract_email_folders.py <CaseExport> [-o DIR] [--extract-zips]
+python3 extract_email_folders.py <CaseExport> [-o DIR] [--keep-all-versions] [--extract-zips]
 ```
 
 - `-o / --output` — output root (default `<CaseExport>/emails_by_date`)
+- `--keep-all-versions` — when two attachments in one folder share a name,
+  compare their content (SHA-256): byte-identical → stored once; different →
+  both kept, the second saved as `name [8-char hash].ext`:
+
+  ```
+  INSPECTION REPORT.pdf                  <- record A's copy
+  INSPECTION REPORT [f85d4cb2].pdf       <- record B's copy (different content)
+  ```
+
+  The tag is the start of that attachment's `ccd/binary/<hash>` name, so every
+  copy stays traceable to its source record, and names are deterministic —
+  re-runs never shuffle which copy gets which name (unlike `(2)` counters).
+  Default: first copy wins.
+
 - `--extract-zips` — additionally extract every `.zip` attachment into
   `<email folder>/extractions/<zip-name>/`, **using 7-Zip only**:
 
@@ -141,6 +155,40 @@ CaseExport/
 - **Hash lengths:** real MD5 names are 32 hex chars; exports reconstructed from
   other sources may contain near-miss lengths, so nothing assumes a fixed
   length — `ccd/binary/` is the source of truth.
+
+## Ports: PowerShell & C#
+
+Both tools exist in three languages; the Python versions are the reference
+implementations and share identical behavior (same classification rules,
+time-grouping, filename materialization, versioning, 7-Zip-only zip
+extraction).
+
+### PowerShell (`powershell/`) — Windows PowerShell 5.1+ and PowerShell 7
+
+```powershell
+.\powershell\Parse-Export.ps1 C:\cases\CaseExport
+.\powershell\Extract-EmailFolders.ps1 C:\cases\CaseExport -KeepAllVersions -ExtractZips
+# custom output:
+.\powershell\Extract-EmailFolders.ps1 C:\cases\CaseExport -Output D:\out -ExtractZips
+```
+
+No modules required; 7-Zip detection checks `PATH` and `%ProgramFiles%\7-Zip`.
+
+### C# (`csharp/`) — .NET 8
+
+```bash
+cd csharp
+dotnet run -- report  ../examples/demo_case
+dotnet run -- folders ../examples/demo_case --keep-all-versions --extract-zips
+# single-file exe for deployment:
+dotnet publish -c Release -r win-x64 --self-contained -p PublishSingleFile=true
+```
+
+> Parity note: all three implementations were verified to produce
+> **byte-identical output** (report HTML, materialized attachments, email
+> folders, and `.manifest.json` sidecars) against the bundled demo export.
+> The PowerShell ports additionally target Windows PowerShell 5.1 syntax;
+> give them one run on your target machine as a smoke test.
 
 ## License
 

@@ -2,13 +2,16 @@
 """Organize a Forcepoint case export's email attachments into per-email folders.
 
 Usage:
-    python3 extract_email_folders.py <path-to-CaseExport> [-o outdir] [--extract-zips]
+    python3 extract_email_folders.py <path-to-CaseExport> [-o outdir] [--keep-all-versions] [--extract-zips]
 
 Emails are grouped by the *agent* time of the record (``evidence.agentTime``,
 falling back to ``startDate`` / ``dateId``): every email sharing the same
 timestamp goes into **one** folder, and attachments with the same filename are
-kept only **once** per folder. The folder name lists all senders/recipients in
-the group (comma-joined)::
+kept only **once** per folder. With ``--keep-all-versions``, a same-named
+attachment whose *content* differs (SHA-256) is kept too, saved as
+``name [8-char hash].ext`` — deterministic across runs and traceable back to
+the exact ``ccd/binary/<hash>`` entry. The folder name lists all
+senders/recipients in the group (comma-joined)::
 
     2026-09-27_143806 - from alice@corp.com - to bob@partner.com/
         INSPECTION REPORT.pdf          <- original filename, not the hash
@@ -42,6 +45,7 @@ Non-destructive: nothing under the CaseExport tree is modified; folders are
 created under ``<root>/emails_by_date`` by default.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -118,6 +122,11 @@ def sanitize(name: str) -> str:
     return name[:120] if len(name) > 120 else name
 
 
+def content_hash(path: Path) -> str:
+    """SHA-256 of a file's bytes — the identity test for same-named attachments."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def find_7zip():
     """Locate a 7-Zip CLI: PATH first, then standard Windows install dirs.
 
@@ -184,6 +193,12 @@ def main() -> None:
         help="Extract .zip attachments into <email folder>/extractions/<zip-name>/ "
              "using 7-Zip ONLY; skipped with a warning if 7-Zip is not found",
     )
+    ap.add_argument(
+        "--keep-all-versions", action="store_true",
+        help="Keep same-named attachments with DIFFERENT content side by side "
+             "(second saved as 'name [8-char hash].ext'); identical content is "
+             "stored once. Default: first copy wins.",
+    )
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -239,24 +254,38 @@ def main() -> None:
             ],
         }, indent=4) + "\n")
 
-        # One copy per filename across the whole time-group.
-        present = set()
+        # One copy per filename; with --keep-all-versions, same-named files
+        # whose CONTENT differs are kept side by side under a hash-tagged name.
+        present = {}  # final filename -> sha256 of its bytes
         for email in emails:
             for att in email["attachments"]:
+                src = root / "ccd" / "binary" / att["hash"]
+                if not src.is_file():
+                    continue
+                chash = content_hash(src)
                 name = sanitize(att.get("fileName") or att["hash"])
                 if name in present:
-                    continue  # same-named attachment already in this folder
-                present.add(name)
-                src = root / "ccd" / "binary" / att["hash"]
-                if src.is_file():
-                    shutil.copy2(src, folder / name)
-                    copied += 1
-                    if sevenzip and name.lower().endswith(".zip"):
-                        dest = folder / "extractions" / (sanitize(Path(name).stem) or "archive")
-                        if extract_zip_7z(folder / name, dest, sevenzip):
-                            extracted += 1
-                        else:
-                            zip_failures.append(f"{folder.name}/{name}")
+                    if present[name] == chash:
+                        continue  # byte-identical copy already stored
+                    if not args.keep_all_versions:
+                        continue  # default policy: first copy wins
+                    stem, dot, ext = name.partition(".")
+                    tag = f" [{att['hash'][:8]}]"
+                    cand = f"{stem}{tag}{dot}{ext}"
+                    n = 2
+                    while cand in present and present[cand] != chash:
+                        cand = f"{stem}{tag} ({n}){dot}{ext}"
+                        n += 1
+                    name = cand
+                present[name] = chash
+                shutil.copy2(src, folder / name)
+                copied += 1
+                if sevenzip and name.lower().endswith(".zip"):
+                    dest = folder / "extractions" / (sanitize(Path(name).stem) or "archive")
+                    if extract_zip_7z(folder / name, dest, sevenzip):
+                        extracted += 1
+                    else:
+                        zip_failures.append(f"{folder.name}/{name}")
         made += 1
 
     summary = f"Wrote {made} time-grouped email folder(s), {copied} attachment file(s) under {out_dir}"
